@@ -6,6 +6,8 @@
 #include <assert.h>
 #include <cstdio>
 
+#include <bitset>
+
 // C-API
 #include "taichi_core_impl.h"
 #include "taichi/taichi_core.h"
@@ -23,7 +25,8 @@ constexpr int init_height = 30720;
 constexpr int num_runs = 100;
 constexpr int max_num_frames = 1000;
 constexpr int slice_size = 1000000;
-constexpr int num_rows = slice_size % init_width;
+constexpr int num_rows = slice_size / init_width;
+constexpr int n = 30720;
 
 template<typename T>
 std::vector<T> read_binary_from_file(const std::string& filename,
@@ -44,6 +47,7 @@ std::vector<T> read_binary_from_file(const std::string& filename,
     if (bytes_read != lSize) {fputs ("Reading error",stderr); exit (3);}
 
     fclose(pFile);
+    
     return result;
 }
 
@@ -55,10 +59,14 @@ void update_sliced_array(TiRuntime runtime,
                          size_t length,
                          size_t dtype_size) {
     void* ptr = ti_map_memory(runtime, memory);
-    size_t row_offset = buffer + row_index * width * dtype_size;
+    char* row_offset = (char*)buffer + row_index * width * dtype_size;
     size_t size_in_bytes = length * dtype_size;
-    std::memcpy(ptr, row_offset, size_in_bytes);
+    for(int i = 0; i < length * width; i++) {
+        ((char*)ptr)[i] = row_offset[i];
+    }
+
     ti_unmap_memory(runtime, memory);
+    
 }
 
 static taichi::Arch get_taichi_arch(const std::string& arch_name_) {
@@ -111,7 +119,7 @@ struct guiHelper {
                        const std::string& arch_name) {
       glfwInit();
       glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
-      window = glfwCreateWindow(img_h, img_w, "Taichi show", NULL, NULL);
+      window = glfwCreateWindow(img_size, img_size, "Taichi show", NULL, NULL);
       if (window == NULL) {
         std::cout << "Failed to create GLFW window" << std::endl;
         glfwTerminate();
@@ -120,8 +128,8 @@ struct guiHelper {
       // Create a GGUI configuration
       taichi::ui::AppConfig app_config;
       app_config.name = "TaichiSparse";
-      app_config.width = img_w;
-      app_config.height = img_h;
+      app_config.width = img_size;
+      app_config.height = img_size;
       app_config.vsync = true;
       app_config.show_window = false;
       app_config.package_path = "."; // make it flexible later
@@ -143,7 +151,7 @@ struct guiHelper {
       f_info.field_type = taichi::ui::FieldType::Scalar;
       f_info.matrix_rows = 1;
       f_info.matrix_cols = 1;
-      f_info.shape = { img_h, img_w };
+      f_info.shape = { img_size, img_size, img_c };
 
       f_info.field_source = get_field_source(arch_name);
       f_info.dtype = taichi::lang::PrimitiveType::f32;
@@ -187,10 +195,10 @@ static void taichi_sparse_test(const std::string& arch_name,
   TiKernel k_fill_img_b = ti_get_aot_module_kernel(aot_mod, "fill_img_b");
  
   /* Kernel Initialization */
-  const std::vector<int> shape_3d = { img_size, img_size, img_c };
+  const std::vector<int> shape_2d = { num_rows, init_width };
   auto init_buffer_ = capi::utils::make_ndarray(runtime,
                                                 TiDataType::TI_DATA_TYPE_U8,
-                                                shape_2d.data(), 1,
+                                                shape_2d.data(), 2,
                                                 nullptr, 0,
                                                 false /*host_read*/, false /*host_write*/
                                                 );
@@ -207,7 +215,7 @@ static void taichi_sparse_test(const std::string& arch_name,
 
   // Initialize with slice
   ti_launch_kernel(runtime, k_clear, 0, &init_buffer_args[0]);
-  for(size_t i = 0; i < init_height; i = i + num_rows) {
+  for(int i = 0; i < init_height; i = i + num_rows) {
         // i
         TiArgument i_arg = {.type = TiArgumentType::TI_ARGUMENT_TYPE_I32,
                             .value = {.i32 = i}};
@@ -220,38 +228,44 @@ static void taichi_sparse_test(const std::string& arch_name,
         init_buffer_args[3] = rows_arg;
         
         // init_buffer[i:i+num_rows, :] -> init_buffer_
-        void update_sliced_array(runtime, init_buffer_.memory_,
-                                 init_buffer_val.data()/* void* buffer */,
-                                 init_width/* int width */,
-                                 i/* int row_index */,
-                                 num_rows /* length */,
-                                 1 /* size_t dtype_size */);
-
+        update_sliced_array(runtime, init_buffer_.memory_,
+                            init_buffer_val.data()/* void* buffer */,
+                            init_width/* int width */,
+                            i/* int row_index */,
+                            num_rows /* length */,
+                            1 /* size_t dtype_size */);
+        
         ti_launch_kernel(runtime, k_init_from_slices, 4, &init_buffer_args[0]);
   }
 
   /* Prepare Image for GUI*/
+  TiArgument region_size_arg = {.type = TiArgumentType::TI_ARGUMENT_TYPE_I32,
+                                .value = {.i32 = n}};
+  
   const std::vector<int> shape_3d = { img_size, img_size, img_c };
   auto arr_ = capi::utils::make_ndarray(runtime,
                                         TiDataType::TI_DATA_TYPE_F32,
-                                        shape_3d.data(), 1,
+                                        shape_3d.data(), 3,
                                         nullptr, 0,
                                         false /*host_read*/, false /*host_write*/
                                         );
-  TiArgument arr_args[1] = { arr_.arg_ };
+  TiArgument arr_args[2] = { region_size_arg, arr_.arg_ };
 
   Runtime* real_runtime = (Runtime *)runtime;
   taichi::lang::DeviceAllocation devalloc = devmem2devalloc(*real_runtime, arr_.memory_);
   guiHelper gui_helper(devalloc, arch_name);
 
   for(size_t frame = 0; frame < max_num_frames; frame++) {
+
       // running(state_a, state_b)
       for(size_t i = 0; i < num_runs; i++) {
         ti_launch_kernel(runtime, k_evolve_a_b, 0, &arr_args[0]);
         ti_launch_kernel(runtime, k_evolve_b_a, 0, &arr_args[0]);
       }
-      ti_launch_kernel(runtime, k_fill_img_a, 1, &arr_args[0]);
+      
+      ti_launch_kernel(runtime, k_fill_img_a, 2, &arr_args[0]);
       ti_wait(runtime);
+
       gui_helper.step();
 
       // running(state_b, state_a)
@@ -259,8 +273,9 @@ static void taichi_sparse_test(const std::string& arch_name,
         ti_launch_kernel(runtime, k_evolve_b_a, 0, &arr_args[0]);
         ti_launch_kernel(runtime, k_evolve_a_b, 0, &arr_args[0]);
       }
-      ti_launch_kernel(runtime, k_fill_img_b, 1, &arr_args[0]);
+      ti_launch_kernel(runtime, k_fill_img_b, 2, &arr_args[0]);
       ti_wait(runtime);
+      
       gui_helper.step();
   }
   

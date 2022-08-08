@@ -58,7 +58,7 @@ elif args.arch == "x64":
 else:
     assert False
 
-ti.init(arch=arch)
+ti.init(arch=arch, offline_cache=False)
 
 img_size = 512
 img_c = 4
@@ -79,7 +79,6 @@ block.dense(ti.ij, (N // n_blocks, N // (bits * n_blocks))).quant_array(
     ti.j, bits, max_num_bits=bits).place(state_b)
 
 arr = ti.ndarray(ti.f32, shape=(img_size, img_size, img_c))
-
 
 @ti.kernel
 def evolve_a_b():
@@ -111,12 +110,12 @@ def evolve_b_a():
         num_active_neighbors += ti.cast(state_b[i + 1, j + 1], ti.u32)
         state_a[i, j] = (num_active_neighbors == 3) | ((num_active_neighbors == 2) & (state_b[i, j] == 1))
 
-
 @ti.func
 def fill_pixel(scale, buffer, i, j, region_size):
     ii = i * 1.0 / img_size
     jj = j * 1.0 / img_size
     ret_val = 0.0
+    
     if scale > 1:
         sx1, sx2, sy1, sy2 = j * scale, (j + 1) * scale, i * scale, (i + 1) * scale
         x1 = ti.cast(sx1, ti.i32)
@@ -132,11 +131,11 @@ def fill_pixel(scale, buffer, i, j, region_size):
                     val += buffer[boundary_offset + int(n / 2) - int(region_size / 2) + mm,
                                   boundary_offset + int(n / 2) - int(region_size / 2) + nn]
         ret_val = val
+    
     else:
         ret_val = buffer[int(boundary_offset + int(n / 2) - region_size / 2 + region_size * ii),
                    int(boundary_offset + int(n / 2) - region_size / 2  + region_size * jj)]
     return ret_val
-
 
 @ti.kernel
 def fill_img_a(region_size: ti.i32, arr: ti.types.ndarray()):
